@@ -1,0 +1,259 @@
+import torch
+import numpy as np
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from scipy import signal as scipySignal
+import torch.nn as nn
+import sys
+import pandas as pd
+import math
+
+# loading data from the txt file, which is a copy-paste from the excel file that is a concatenation of all the excel files
+
+#all_data = torch.from_numpy(pd.read_csv('/Users/samlowenstein/Downloads/pulsedatasets/CombinedDataTest2.csv').values)
+
+#insert data file in line below
+all_data=torch.from_numpy(np.loadtxt('/Users/samlowenstein/Downloads/Blood Pressure Data/Blood Pressure Input 2.txt',dtype=float))
+
+#writes to a file
+output_data=torch.from_numpy(np.loadtxt('/Users/samlowenstein/Downloads/Blood Pressure Data/Blood Pressure Output 2.txt',dtype=float))
+
+def down_sample(y,rate):    # essentially reduces the sampling rate to improve net's efficiency
+    
+    for i in range(int(y.size/rate)):
+        
+        if i==0:
+            ydown=torch.tensor([y[0]])
+        else:
+            yadd=torch.tensor([y[rate*i]])
+            ydown=torch.cat((yadd,ydown),0)
+    return ydown
+
+def filtering1(y1):  # filter function, makes data look nicer, don't ask me how it works
+    samplingFrequency=1000
+    lowPassFilterCutoff = 100
+    fc = lowPassFilterCutoff/samplingFrequency;
+    wc = fc *(2*np.pi) 
+    nyquistFrequency = 20
+
+    wc_normalized = wc/nyquistFrequency
+
+    b,a = scipySignal.butter(4,wc_normalized,btype='low',output='ba',analog=False)
+
+    yfilt = (scipySignal.filtfilt(b,a,y1,method='pad'))
+    return torch.from_numpy(yfilt.copy())
+
+def filtering2(y1):  # filter function for second reading
+    samplingFrequency=1000
+    lowPassFilterCutoff = 100
+    fc = lowPassFilterCutoff/samplingFrequency;
+    wc = fc *(2*np.pi) 
+    nyquistFrequency = 20
+
+    wc_normalized = wc/nyquistFrequency
+
+    b,a = scipySignal.butter(4,wc_normalized,btype='low',output='ba',analog=False)
+
+    yfilt = (scipySignal.filtfilt(b,a,y1,method='pad'))
+    return torch.from_numpy(yfilt.copy())
+
+for trial in range(int(all_data.size()[1]/2)):  # executes once per three columns in file
+    
+    # takes first reading and filters it
+    next_part=all_data[:,2*trial]
+    y1=next_part.numpy()
+    y1=down_sample(y1,50)
+#    next_part=y1
+    next_part=filtering1(y1)
+    
+    # takes second reading and filters it
+    next_part2=all_data[:,2*trial+1]
+    y1=next_part2.numpy()
+    y1=down_sample(y1,50)
+#    next_part2=y1
+    next_part2=filtering2(y1)
+    
+    
+    for hundred in range(int(next_part.size()[0]/100)):    # cuts data up into 9 pieces of 100 points each
+        
+        next_hundred=next_part[100*hundred:100*(hundred+1)].unsqueeze(0)
+        next_hundred2=next_part2[100*hundred:100*(hundred+1)].unsqueeze(0)
+        
+        # concatenates both readings, then concatenates 9 pieces into 1 tensor
+        if hundred==0:
+            combined=torch.cat((next_hundred,next_hundred2),0).unsqueeze(0)
+        else:
+            addition=torch.cat((next_hundred,next_hundred2),0).unsqueeze(0)
+            combined=torch.cat((combined,addition),0)
+    
+    # assembles input data from above sets of 9
+    if trial==0:
+        input_data=combined
+    else:
+        input_addition=combined
+        input_data=torch.cat((input_data,input_addition),0)
+
+#for i in range(input_data.size()[0]):
+#plt.plot(range(100),input_data.numpy()[0,0,:],"r-",lw=5)
+#plt.plot(range(100),input_data.numpy()[0,1,:],"b-",lw=5)
+#plt.pause(.1)
+    
+input_data=input_data.unsqueeze(1)  # messes with input data dimensions  
+
+# writes output data
+for trial in range(output_data.size()[0]):
+    for second in range(10):
+        if trial==0 and second==0:
+            blood_pressure=output_data[0,:].unsqueeze(0)
+            
+        else:
+            addition=output_data[trial,:].unsqueeze(0)
+            blood_pressure=torch.cat((blood_pressure,addition),0)
+            
+blood_pressure=blood_pressure[:,0].unsqueeze(1).unsqueeze(1).unsqueeze(3) # messes with output data dimensions
+
+# establishes divide between training and testing sets
+cutoff=int(input_data.size()[0]*3/4)
+
+# normalizes input and output data
+input_max=5
+output_max=40
+x=(input_data.float()/input_max)[0:-1:2,:]
+y=(blood_pressure.float()/output_max)[0:-1:2]
+num_layers=1
+
+#neural net begins
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        if num_layers==2:
+            self.conv1 = nn.Conv2d(1, 10, (2,20))
+            self.fc1 = nn.Linear(72, 60)
+        else:
+            self.conv1 = nn.Conv2d(1, 1, (2,20))
+            self.fc1 = nn.Linear(81, 60)
+        self.conv2 = nn.Conv1d(10, 1, 10)
+        self.fc2 = nn.Linear(60, 60)
+        self.fc3 = nn.Linear(60, 1)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, (1, 1)).squeeze()
+        if num_layers==2:
+            x = F.relu(self.conv2(x))
+            x = F.max_pool2d(x, (1, 1))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        if num_layers==2:
+            x = self.fc3(x).unsqueeze(3)
+        else:
+            x=self.fc3(x).unsqueeze(1).unsqueeze(3)
+        return x
+    
+net = Net()
+#insert data weights in line below
+net.load_state_dict(torch.load('/Users/samlowenstein/Documents/SummerResearch/Blood Pressure Weights Convolutional Systolic Saved 1.rtf'))
+#print(net)
+
+optimizer = torch.optim.SGD(net.parameters(), lr=.01) # specify an optimizer for the optimization process
+loss_func = torch.nn.MSELoss()
+
+for t in range(1):
+    prediction = net(x)     # input x and predict based on x
+    loss = loss_func(prediction, y)     # must be (1. nn output, 2. target)
+
+    optimizer.zero_grad()   # clear gradients for next train
+    loss.backward()         # backpropagation, compute gradients
+    optimizer.step()        # apply gradients
+
+    if (t) % 5 == 0:
+        print('Trial #'+str(t))
+        #print('Prediction: '+str(prediction))
+        print('Loss: '+str(loss.item()))
+        #q=torch.linspace(-1, 1, 100)
+        #plt.plot(q.numpy(),y.numpy(), 'b-',lw=5)
+        #plt.plot(q.numpy(),prediction.detach().numpy(), 'r-',lw=5)
+        #plt.pause(0.001)
+
+#print('Target: '+str(y*output_max))
+#print('Difference: '+str((prediction-y)*output_max))
+
+print("\nTraining Set Loss: "+str(loss.item()))
+
+print("\nSystolic:")
+plt.plot(range(y.size()[0]),(prediction[:,:,0,:]*output_max).squeeze().detach().numpy(), 'r-',lw=5)
+plt.plot(range(y.size()[0]),(y[:,:,0,:]*output_max).squeeze().detach().numpy(), 'b-',lw=5)
+plt.pause(0.001)
+
+difference=(y.squeeze()-prediction.squeeze())*output_max
+square=torch.pow(difference, 2)
+sum_of_squares=torch.sum(square)
+mean=sum_of_squares/y.size()[0]
+standard_deviation=math.sqrt(mean)
+print("\nStandard Deviation: "+str(standard_deviation))
+
+#torch.save(net.state_dict(), '/Users/samlowenstein/Documents/SummerResearch/Blood Pressure Weights Convolutional Systolic 10.rtf')
+
+if cutoff<input_data.size()[0]:     # utilizes testing set
+    
+    final_row=(input_data.float()/input_max)[1:-1:2,:]
+    final_y=(blood_pressure.float()/output_max)[1:-1:2]
+    #print("Target: "+str(final_y*output_max))
+    final_guess=net(final_row)
+    #print("Prediction: "+str(final_guess*output_max))
+    final_loss=loss_func(final_guess,final_y)
+    
+    print("\nTesting Set Loss: "+str(final_loss.item()))
+    
+    print("\nSystolic:")
+    plt.plot(range(final_y.size()[0]),(final_guess[:,:,0,:]*output_max).squeeze().detach().numpy(), 'r-',lw=5)
+    plt.plot(range(final_y.size()[0]),(final_y[:,:,0,:]*output_max).squeeze().detach().numpy(), 'b-',lw=5)
+    plt.pause(.001)
+    
+    difference=(final_y.squeeze()-final_guess.squeeze())*output_max
+    square=torch.pow(difference, 2)
+    sum_of_squares=torch.sum(square)
+    mean=sum_of_squares/final_y.size()[0]
+    standard_deviation=math.sqrt(mean)
+    print("\nStandard Deviation: "+str(standard_deviation))
+    golden_mean=torch.sum((final_y*output_max).squeeze())/final_y.size()[0]
+    print("Error: "+str((100*standard_deviation/golden_mean).item())+"%")
+    
+    x = torch.unsqueeze(torch.linspace(15, 30, 200), dim=1)
+    
+    plt.scatter((final_y*output_max).detach().numpy(), (final_guess*output_max).detach().numpy())
+    plt.show()
+
+
+# for param in net.parameters():
+#     print(param.data)
+# torch.save(net,'attempt.pt')
+
+#finds best fit line
+regression=np.polyfit((final_y*output_max).squeeze().detach().numpy(),(final_guess*output_max).squeeze().detach().numpy(),1)
+x=torch.linspace(15,30,200)
+y=regression[0]*x+regression[1]
+
+# creates final graph
+plt.scatter((final_y*output_max).detach().numpy(), (final_guess*output_max).detach().numpy())
+plt.plot(x.numpy(),y.numpy(),"r-",lw=5)
+plt.show()
+
+final_y=final_y.squeeze()*output_max
+final_guess=final_guess.squeeze()*output_max
+
+new_y=final_y*regression[0]+regression[1]
+
+# finds error of scatter points to red line
+difference=(new_y-final_guess.squeeze())
+square=torch.pow(difference, 2)
+sum_of_squares=torch.sum(square)
+mean=sum_of_squares/new_y.size()[0]
+standard_deviation=math.sqrt(mean)
+print("\nStandard Deviation: "+str(standard_deviation))
+golden_mean=torch.sum((new_y).squeeze())/final_y.size()[0]
+print("Error: "+str((100*standard_deviation/golden_mean).item())+"%")
+print("Best Fit Line: y = "+str(regression[0])+"x + "+str(regression[1]))
+
+plt.hist(difference.detach().numpy())
+plt.show()
